@@ -3,129 +3,129 @@ package pool
 import (
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 )
 
 // channelPool implements the Pool interface based on buffered channels.
 type channelPool struct {
-	// storage for our net.Conn connections
-	mu    sync.Mutex
-	conns chan net.Conn
+	// storage for our RPC-able connections
+	mu     sync.Mutex
+	rconns chan RpcAble
 
-	// net.Conn generator
+	// RpcAble generator
 	factory Factory
 }
 
-// Factory is a function to create new connections.
-type Factory func() (net.Conn, error)
+// Factory is a function to create new RPC-able connections.
+type Factory func() (RpcAble, error)
 
-// NewChannelPool returns a new pool based on buffered channels with an initial
-// capacity and maximum capacity. Factory is used when initial capacity is
-// greater than zero to fill the pool. A zero initialCap doesn't fill the Pool
-// until a new Get() is called. During a Get(), If there is no new connection
-// available in the pool, a new connection will be created via the Factory()
-// method.
+// NewChannelPool returns a new pool based on buffered channels with
+// an initial capacity and maximum capacity. Factory is used when
+// initial capacity is greater than zero to fill the pool. A zero
+// initialCap doesn't fill the Pool until a new Get() is
+// called. During a Get(), If there is no new RPC-able connection
+// available in the pool, a new RPC-able connection will be created
+// via the Factory() method.
 func NewChannelPool(initialCap, maxCap int, factory Factory) (Pool, error) {
 	if initialCap < 0 || maxCap <= 0 || initialCap > maxCap {
 		return nil, errors.New("invalid capacity settings")
 	}
 
 	c := &channelPool{
-		conns:   make(chan net.Conn, maxCap),
+		rconns:  make(chan RpcAble, maxCap),
 		factory: factory,
 	}
 
-	// create initial connections, if something goes wrong,
+	// create initial RPC-able connections, if something goes wrong,
 	// just close the pool error out.
 	for i := 0; i < initialCap; i++ {
-		conn, err := factory()
+		rconn, err := factory()
 		if err != nil {
 			c.Close()
 			return nil, fmt.Errorf("factory is not able to fill the pool: %s", err)
 		}
-		c.conns <- conn
+		c.rconns <- rconn
 	}
 
 	return c, nil
 }
 
-func (c *channelPool) getConns() chan net.Conn {
+func (c *channelPool) getRconns() chan RpcAble {
 	c.mu.Lock()
-	conns := c.conns
+	rconns := c.rconns
 	c.mu.Unlock()
-	return conns
+	return rconns
 }
 
 // Get implements the Pool interfaces Get() method. If there is no new
-// connection available in the pool, a new connection will be created via the
-// Factory() method.
-func (c *channelPool) Get() (net.Conn, error) {
-	conns := c.getConns()
-	if conns == nil {
+// RPC-able connection available in the pool, a new RPC-able
+// connection will be created via the Factory() method.
+func (c *channelPool) Get() (RpcAble, error) {
+	rconns := c.getRconns()
+	if rconns == nil {
 		return nil, ErrClosed
 	}
 
-	// wrap our connections with out custom net.Conn implementation (wrapConn
-	// method) that puts the connection back to the pool if it's closed.
+	// wrap our rconns with out custom RpcAble implementation (wrapRconn
+	// method) that puts the RPC-able connection back to the pool if it's closed.
 	select {
-	case conn := <-conns:
-		if conn == nil {
+	case rconn := <-rconns:
+		if rconn == nil {
 			return nil, ErrClosed
 		}
 
-		return c.wrapConn(conn), nil
+		return c.wrapRconn(rconn), nil
 	default:
-		conn, err := c.factory()
+		rconn, err := c.factory()
 		if err != nil {
 			return nil, err
 		}
 
-		return c.wrapConn(conn), nil
+		return c.wrapRconn(rconn), nil
 	}
 }
 
-// put puts the connection back to the pool. If the pool is full or closed,
-// conn is simply closed. A nil conn will be rejected.
-func (c *channelPool) put(conn net.Conn) error {
-	if conn == nil {
-		return errors.New("connection is nil. rejecting")
+// put puts the rconn back to the pool. If the pool is full or closed,
+// rconn is simply closed. A nil rconn will be rejected.
+func (c *channelPool) put(rconn RpcAble) error {
+	if rconn == nil {
+		return errors.New("rconn is nil. rejecting")
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.conns == nil {
-		// pool is closed, close passed connection
-		return conn.Close()
+	if c.rconns == nil {
+		// pool is closed, close passed rconn
+		return rconn.Close()
 	}
 
 	// put the resource back into the pool. If the pool is full, this will
 	// block and the default case will be executed.
 	select {
-	case c.conns <- conn:
+	case c.rconns <- rconn:
 		return nil
 	default:
-		// pool is full, close passed connection
-		return conn.Close()
+		// pool is full, close passed rconn
+		return rconn.Close()
 	}
 }
 
 func (c *channelPool) Close() {
 	c.mu.Lock()
-	conns := c.conns
-	c.conns = nil
+	rconns := c.rconns
+	c.rconns = nil
 	c.factory = nil
 	c.mu.Unlock()
 
-	if conns == nil {
+	if rconns == nil {
 		return
 	}
 
-	close(conns)
-	for conn := range conns {
-		conn.Close()
+	close(rconns)
+	for rconn := range rconns {
+		rconn.Close()
 	}
 }
 
-func (c *channelPool) Len() int { return len(c.getConns()) }
+func (c *channelPool) Len() int { return len(c.getRconns()) }

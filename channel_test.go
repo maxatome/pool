@@ -4,6 +4,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"net/rpc"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +15,13 @@ var (
 	MaximumCap = 30
 	network    = "tcp"
 	address    = "127.0.0.1:7777"
-	factory    = func() (net.Conn, error) { return net.Dial(network, address) }
+	factory    = func() (RpcAble, error) {
+		conn, err := net.Dial(network, address)
+		if err != nil {
+			return nil, err
+		}
+		return rpc.NewClient(conn), nil
+	}
 )
 
 func init() {
@@ -35,14 +42,14 @@ func TestPool_Get_Impl(t *testing.T) {
 	p, _ := newChannelPool()
 	defer p.Close()
 
-	conn, err := p.Get()
+	rconn, err := p.Get()
 	if err != nil {
 		t.Errorf("Get error: %s", err)
 	}
 
-	_, ok := conn.(*PoolConn)
+	_, ok := rconn.(*PoolRconn)
 	if !ok {
-		t.Errorf("Conn is not of type poolConn")
+		t.Errorf("Rconn is not of type PoolRconn")
 	}
 }
 
@@ -94,15 +101,15 @@ func TestPool_Put(t *testing.T) {
 	defer p.Close()
 
 	// get/create from the pool
-	conns := make([]net.Conn, MaximumCap)
+	rconns := make([]RpcAble, MaximumCap)
 	for i := 0; i < MaximumCap; i++ {
-		conn, _ := p.Get()
-		conns[i] = conn
+		rconn, _ := p.Get()
+		rconns[i] = rconn
 	}
 
 	// now put them all back
-	for _, conn := range conns {
-		conn.Close()
+	for _, rconn := range rconns {
+		rconn.Close()
 	}
 
 	if p.Len() != MaximumCap {
@@ -110,37 +117,37 @@ func TestPool_Put(t *testing.T) {
 			1, p.Len())
 	}
 
-	conn, _ := p.Get()
+	rconn, _ := p.Get()
 	p.Close() // close pool
 
-	conn.Close() // try to put into a full pool
+	rconn.Close() // try to put into a full pool
 	if p.Len() != 0 {
-		t.Errorf("Put error. Closed pool shouldn't allow to put connections.")
+		t.Errorf("Put error. Closed pool shouldn't allow to put rconns.")
 	}
 }
 
-func TestPool_PutUnusableConn(t *testing.T) {
+func TestPool_PutUnusableRconn(t *testing.T) {
 	p, _ := newChannelPool()
 	defer p.Close()
 
 	// ensure pool is not empty
-	conn, _ := p.Get()
-	conn.Close()
+	rconn, _ := p.Get()
+	rconn.Close()
 
 	poolSize := p.Len()
-	conn, _ = p.Get()
-	conn.Close()
+	rconn, _ = p.Get()
+	rconn.Close()
 	if p.Len() != poolSize {
 		t.Errorf("Pool size is expected to be equal to initial size")
 	}
 
-	conn, _ = p.Get()
-	if pc, ok := conn.(*PoolConn); !ok {
+	rconn, _ = p.Get()
+	if pc, ok := rconn.(*PoolRconn); !ok {
 		t.Errorf("impossible")
 	} else {
 		pc.MarkUnusable()
 	}
-	conn.Close()
+	rconn.Close()
 	if p.Len() != poolSize-1 {
 		t.Errorf("Pool size is expected to be initial_size - 1", p.Len(), poolSize-1)
 	}
@@ -164,8 +171,8 @@ func TestPool_Close(t *testing.T) {
 
 	c := p.(*channelPool)
 
-	if c.conns != nil {
-		t.Errorf("Close error, conns channel should be nil")
+	if c.rconns != nil {
+		t.Errorf("Close error, rconns channel should be nil")
 	}
 
 	if c.factory != nil {
@@ -174,7 +181,7 @@ func TestPool_Close(t *testing.T) {
 
 	_, err := p.Get()
 	if err == nil {
-		t.Errorf("Close error, get conn should return an error")
+		t.Errorf("Close error, get rconn should return an error")
 	}
 
 	if p.Len() != 0 {
@@ -184,7 +191,7 @@ func TestPool_Close(t *testing.T) {
 
 func TestPoolConcurrent(t *testing.T) {
 	p, _ := newChannelPool()
-	pipe := make(chan net.Conn, 0)
+	pipe := make(chan RpcAble, 0)
 
 	go func() {
 		p.Close()
@@ -192,32 +199,34 @@ func TestPoolConcurrent(t *testing.T) {
 
 	for i := 0; i < MaximumCap; i++ {
 		go func() {
-			conn, _ := p.Get()
+			rconn, _ := p.Get()
 
-			pipe <- conn
+			pipe <- rconn
 		}()
 
 		go func() {
-			conn := <-pipe
-			if conn == nil {
+			rconn := <-pipe
+			if rconn == nil {
 				return
 			}
-			conn.Close()
+			rconn.Close()
 		}()
 	}
 }
 
-func TestPoolWriteRead(t *testing.T) {
-	p, _ := NewChannelPool(0, 30, factory)
-
-	conn, _ := p.Get()
-
-	msg := "hello"
-	_, err := conn.Write([]byte(msg))
-	if err != nil {
-		t.Error(err)
-	}
-}
+//func TestPoolWriteRead(t *testing.T) {
+//	p, _ := NewChannelPool(0, 30, factory)
+//
+//	rconn, _ := p.Get()
+//
+//	conn := rconn.(net.Conn)
+//
+//	msg := "hello"
+//	_, err := conn.Write([]byte(msg))
+//	if err != nil {
+//		t.Error(err)
+//	}
+//}
 
 func TestPoolConcurrent2(t *testing.T) {
 	p, _ := NewChannelPool(0, 30, factory)
@@ -228,9 +237,9 @@ func TestPoolConcurrent2(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			wg.Add(1)
 			go func(i int) {
-				conn, _ := p.Get()
+				rconn, _ := p.Get()
 				time.Sleep(time.Millisecond * time.Duration(rand.Intn(100)))
-				conn.Close()
+				rconn.Close()
 				wg.Done()
 			}(i)
 		}
@@ -239,9 +248,9 @@ func TestPoolConcurrent2(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(i int) {
-			conn, _ := p.Get()
+			rconn, _ := p.Get()
 			time.Sleep(time.Millisecond * time.Duration(rand.Intn(100)))
-			conn.Close()
+			rconn.Close()
 			wg.Done()
 		}(i)
 	}
